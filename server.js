@@ -42,7 +42,18 @@ const BotUserSchema = new mongoose.Schema({
 });
 const BotUser = mongoose.model('BotUser', BotUserSchema);
 
-// --- HILFSFUNKTIONEN (Aus deinem Original-Code) ---
+// --- BLACKLIST MODELL ---
+const BlacklistSchema = new mongoose.Schema({
+  number: { type: String, required: true, index: true },
+  fan: { type: String, required: true },
+  reason: { type: String, default: '' },
+  count: { type: Number, default: 1 },
+  reporters: { type: [String], default: [] }, // Speichert IPs/Usernames zur Verhinderung doppelter Meldungen
+  createdAt: { type: Date, default: Date.now }
+});
+const Blacklist = mongoose.model('Blacklist', BlacklistSchema);
+
+// --- HILFSFUNKTIONEN ---
 
 function normalizePhone(value) {
   return String(value || '').replace(/\D/g, '');
@@ -63,7 +74,6 @@ function createToken() {
   return crypto.randomBytes(24).toString('hex');
 }
 
-// Erstellt eine schöne Antwort für die App
 function buildBotProfilePayload(entry = {}, fallbackKey = '') {
   return {
     jid: entry.jid || fallbackKey,
@@ -99,7 +109,6 @@ app.post('/api/auth/register', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Fehlende Daten' });
   }
 
-  // 1. Prüfen, ob Nummer im Bot-System (MongoDB) ist
   const botEntry = await BotUser.findOne({ 
     $or: [{ jid: normalizeJid(botIdentifier) }, { phone: normalizePhone(botIdentifier) }] 
   });
@@ -108,7 +117,6 @@ app.post('/api/auth/register', async (req, res) => {
     return res.status(404).json({ success: false, error: 'Nummer nicht im Bot registriert' });
   }
 
-  // 2. Prüfen, ob Account schon existiert
   const exists = await User.findOne({ username: username.toLowerCase() });
   if (exists) return res.status(409).json({ success: false, error: 'Benutzername vergeben' });
 
@@ -147,11 +155,74 @@ app.get('/api/auth/me', async (req, res) => {
   const user = await User.findOne({ token });
   if (!user) return res.status(401).json({ success: false });
 
-  // Bot-Profil live aktualisieren
   const botEntry = await BotUser.findOne({ jid: user.jid });
   user.botProfile = buildBotProfilePayload(botEntry || {});
 
   res.json({ success: true, data: user });
+});
+
+// --- BLACKLIST API ENDPUNKTE ---
+
+// 1. Blacklist abrufen (Öffentlich)
+app.get('/api/blacklist', async (req, res) => {
+  try {
+    const list = await Blacklist.find().sort({ count: -1, createdAt: -1 });
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Fehler beim Laden der Blacklist' });
+  }
+});
+
+// 2. Nummer melden (Mit IP-Tracking & Duplikats-Schutz)
+app.post('/api/blacklist', async (req, res) => {
+  try {
+    const { fan, number, reason } = req.body;
+    
+    // IP-Adresse ermitteln (berücksichtigt Proxies wie Render)
+    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+
+    if (!number || !fan) {
+      return res.status(400).json({ success: false, error: 'Nummer und Name (Fan) sind erforderlich!' });
+    }
+
+    const cleanNumber = String(number).replace(/\D/g, '');
+    let existingEntry = await Blacklist.findOne({ number: cleanNumber });
+
+    if (existingEntry) {
+      // Prüfen, ob dieselbe IP oder derselbe Fan die Nummer bereits gemeldet hat
+      if (existingEntry.reporters.includes(clientIp) || existingEntry.reporters.includes(fan)) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Du oder deine IP haben diese Nummer bereits gemeldet!' 
+        });
+      }
+
+      // Zähler erhöhen und Reporter speichern
+      existingEntry.count += 1;
+      existingEntry.reporters.push(clientIp);
+      existingEntry.reporters.push(fan);
+      if (reason) existingEntry.reason = reason;
+
+      await existingEntry.save();
+      return res.json({ success: true, message: 'Meldung aktualisiert', data: existingEntry });
+    }
+
+    // Neuer Eintrag
+    const newBlacklistEntry = new Blacklist({
+      number: cleanNumber,
+      fan,
+      reason,
+      count: 1,
+      reporters: [clientIp, fan]
+    });
+
+    await newBlacklistEntry.save();
+    res.status(201).json({ success: true, message: 'Nummer erfolgreich gemeldet', data: newBlacklistEntry });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Serverfehler beim Speichern der Meldung' });
+  }
 });
 
 // Start
