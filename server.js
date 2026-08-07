@@ -46,9 +46,10 @@ const BotUser = mongoose.model('BotUser', BotUserSchema);
 const BlacklistSchema = new mongoose.Schema({
   number: { type: String, required: true, index: true },
   fan: { type: String, required: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Eindeutige Account-Verknüpfung
   reason: { type: String, default: '' },
   count: { type: Number, default: 1 },
-  reporters: { type: [String], default: [] }, // Speichert IPs/Usernames zur Verhinderung doppelter Meldungen
+  reporters: { type: [String], default: [] }, // Speichert IPs, JIDs oder User-IDs
   createdAt: { type: Date, default: Date.now }
 });
 const Blacklist = mongoose.model('Blacklist', BlacklistSchema);
@@ -89,7 +90,6 @@ function buildBotProfilePayload(entry = {}, fallbackKey = '') {
 
 // --- API ENDPUNKTE ---
 
-// Health & Status
 app.get('/api/health', (req, res) => res.json({ success: true }));
 
 app.get('/api/status', async (req, res) => {
@@ -173,34 +173,58 @@ app.get('/api/blacklist', async (req, res) => {
   }
 });
 
-// 2. Nummer melden (Mit IP-Tracking & Duplikats-Schutz)
+// 2. Nummer melden (Strenger Schutz über Account-Token & IP)
 app.post('/api/blacklist', async (req, res) => {
   try {
-    const { fan, number, reason } = req.body;
+    const { number, reason } = req.body;
     
-    // IP-Adresse ermitteln (berücksichtigt Proxies wie Render)
+    // Auth-Token aus den Headers prüfen (Erzwingt echten Login statt Fake-Namen)
+    const authHeader = req.headers.authorization;
+    const token = authHeader ? authHeader.replace('Bearer ', '') : null;
+    
+    let fanName = "Anonym";
+    let userIdentifier = null;
+
+    if (token) {
+      const dbUser = await User.findOne({ token });
+      if (dbUser) {
+        fanName = dbUser.name || dbUser.username;
+        userIdentifier = dbUser._id.toString(); // Eindeutige MongoDB-User-ID
+      }
+    }
+
+    // Falls kein gültiger Login vorliegt, abbrechen
+    if (!userIdentifier) {
+      return res.status(401).json({ success: false, error: 'Du musst eingeloggt sein, um eine Nummer zu melden!' });
+    }
+
     const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
 
-    if (!number || !fan) {
-      return res.status(400).json({ success: false, error: 'Nummer und Name (Fan) sind erforderlich!' });
+    if (!number) {
+      return res.status(400).json({ success: false, error: 'Telefonnummer ist erforderlich!' });
     }
 
     const cleanNumber = String(number).replace(/\D/g, '');
     let existingEntry = await Blacklist.findOne({ number: cleanNumber });
 
     if (existingEntry) {
-      // Prüfen, ob dieselbe IP oder derselbe Fan die Nummer bereits gemeldet hat
-      if (existingEntry.reporters.includes(clientIp) || existingEntry.reporters.includes(fan)) {
+      // Prüfen, ob dieser exakte Account (userIdentifier), diese IP oder dieser Name bereits gemeldet hat
+      if (
+        existingEntry.reporters.includes(userIdentifier) || 
+        existingEntry.reporters.includes(clientIp) || 
+        existingEntry.reporters.includes(fanName)
+      ) {
         return res.status(400).json({ 
           success: false, 
-          error: 'Du oder deine IP haben diese Nummer bereits gemeldet!' 
+          error: 'Du hast diese Nummer bereits mit deinem Account oder von dieser IP aus gemeldet!' 
         });
       }
 
-      // Zähler erhöhen und Reporter speichern
+      // Zähler erhöhen und eindeutige Identifikatoren speichern
       existingEntry.count += 1;
+      existingEntry.reporters.push(userIdentifier);
       existingEntry.reporters.push(clientIp);
-      existingEntry.reporters.push(fan);
+      existingEntry.reporters.push(fanName);
       if (reason) existingEntry.reason = reason;
 
       await existingEntry.save();
@@ -210,10 +234,11 @@ app.post('/api/blacklist', async (req, res) => {
     // Neuer Eintrag
     const newBlacklistEntry = new Blacklist({
       number: cleanNumber,
-      fan,
+      fan: fanName,
+      userId: userIdentifier,
       reason,
       count: 1,
-      reporters: [clientIp, fan]
+      reporters: [userIdentifier, clientIp, fanName]
     });
 
     await newBlacklistEntry.save();
