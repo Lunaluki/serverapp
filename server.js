@@ -9,7 +9,8 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-const PORT = process.env.PORT || 3100;
+// WICHTIG: Nutze Render-Port 10000 als Standard, falls keine Umgebungsvariable da ist
+const PORT = process.env.PORT || 10000;
 const MONGO_URI = process.env.MONGODB_URI;
 
 // --- MONGODB MODELLE ---
@@ -46,10 +47,10 @@ const BotUser = mongoose.model('BotUser', BotUserSchema);
 const BlacklistSchema = new mongoose.Schema({
   number: { type: String, required: true, index: true },
   fan: { type: String, required: true },
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Eindeutige Account-Verknüpfung
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   reason: { type: String, default: '' },
   count: { type: Number, default: 1 },
-  reporters: { type: [String], default: [] }, // Speichert IPs, JIDs oder User-IDs
+  reporters: { type: [String], default: [] },
   createdAt: { type: Date, default: Date.now }
 });
 const Blacklist = mongoose.model('Blacklist', BlacklistSchema);
@@ -163,7 +164,6 @@ app.get('/api/auth/me', async (req, res) => {
 
 // --- BLACKLIST API ENDPUNKTE ---
 
-// 1. Blacklist abrufen (Öffentlich)
 app.get('/api/blacklist', async (req, res) => {
   try {
     const list = await Blacklist.find().sort({ count: -1, createdAt: -1 });
@@ -173,12 +173,9 @@ app.get('/api/blacklist', async (req, res) => {
   }
 });
 
-// 2. Nummer melden (Strenger Schutz über Account-Token & IP)
 app.post('/api/blacklist', async (req, res) => {
   try {
     const { number, reason } = req.body;
-    
-    // Auth-Token aus den Headers prüfen (Erzwingt echten Login statt Fake-Namen)
     const authHeader = req.headers.authorization;
     const token = authHeader ? authHeader.replace('Bearer ', '') : null;
     
@@ -189,11 +186,10 @@ app.post('/api/blacklist', async (req, res) => {
       const dbUser = await User.findOne({ token });
       if (dbUser) {
         fanName = dbUser.name || dbUser.username;
-        userIdentifier = dbUser._id.toString(); // Eindeutige MongoDB-User-ID
+        userIdentifier = dbUser._id.toString();
       }
     }
 
-    // Falls kein gültiger Login vorliegt, abbrechen
     if (!userIdentifier) {
       return res.status(401).json({ success: false, error: 'Du musst eingeloggt sein, um eine Nummer zu melden!' });
     }
@@ -208,7 +204,6 @@ app.post('/api/blacklist', async (req, res) => {
     let existingEntry = await Blacklist.findOne({ number: cleanNumber });
 
     if (existingEntry) {
-      // Prüfen, ob dieser exakte Account (userIdentifier), diese IP oder dieser Name bereits gemeldet hat
       if (
         existingEntry.reporters.includes(userIdentifier) || 
         existingEntry.reporters.includes(clientIp) || 
@@ -220,7 +215,6 @@ app.post('/api/blacklist', async (req, res) => {
         });
       }
 
-      // Zähler erhöhen und eindeutige Identifikatoren speichern
       existingEntry.count += 1;
       existingEntry.reporters.push(userIdentifier);
       existingEntry.reporters.push(clientIp);
@@ -231,7 +225,6 @@ app.post('/api/blacklist', async (req, res) => {
       return res.json({ success: true, message: 'Meldung aktualisiert', data: existingEntry });
     }
 
-    // Neuer Eintrag
     const newBlacklistEntry = new Blacklist({
       number: cleanNumber,
       fan: fanName,
@@ -250,7 +243,11 @@ app.post('/api/blacklist', async (req, res) => {
   }
 });
 
-// Start
+// Start mit '0.0.0.0' und dem korrekten Render-Port
 mongoose.connect(MONGO_URI).then(() => {
-  app.listen(PORT, () => console.log(`🚀 Server läuft auf Port ${PORT}`));
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`🚀 Server läuft erfolgreich auf Port ${PORT}`);
+    });
+}).catch(err => {
+    console.error("MongoDB Verbindungsfehler:", err);
 });
